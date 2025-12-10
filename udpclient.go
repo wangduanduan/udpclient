@@ -11,6 +11,8 @@ import (
 
 	"sync/atomic"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type pendingEntry struct {
@@ -24,29 +26,54 @@ type Client struct {
 	shardMask  uint32
 	closed     int32
 
-	// 可配置项
-	MaxAttempts int // 请求失败时最大重试次数（包括第一次），默认 1
-	MinRetryMs  int
+	Config
+}
+
+type Config struct {
+	MaxAttempts int    // 请求失败时最大重试次数，可选，（包括第一次），默认 1
+	MinRetryMs  int    // 重试的最小退避时间，可选，单位毫秒，默认 50ms
+	ShardBits   uint   // 分片数量的位数，可选，默认 8 (256 shards), 必须是 2 的幂
+	LocalAddr   string // 本地地址, 可选，默认 "0.0.0.0:0"
+	RemoteAddr  string // 远程地址, 必须
+
+	*zap.SugaredLogger
 }
 
 func isPowerOfTwo(n int) bool {
 	return n > 0 && (n&(n-1)) == 0
 }
 
-// NewClientDial 创建并 Dial 到指定 remote（localAddr 可用 "0.0.0.0:0" 表示自动分配端口）
-func NewClientDial(localAddr, remoteAddr string, shardBits uint) (*Client, error) {
-	if !isPowerOfTwo(int(shardBits)) {
-		return nil, wrapErr("shardBits must be power of two: %d", shardBits)
-	}
-	if shardBits == 0 || shardBits > 16 {
-		shardBits = 8 // 默认 256 shards
+func New(c Config) (*Client, error) {
+	if c.ShardBits == 0 || c.ShardBits > 16 {
+		c.ShardBits = 8 // 默认 256 shards
 	}
 
-	laddr, err := net.ResolveUDPAddr("udp", localAddr)
+	if c.MaxAttempts < 1 || c.MaxAttempts > 10 {
+		c.MaxAttempts = 10
+	}
+
+	if c.MinRetryMs < 50 {
+		c.MinRetryMs = 50
+	}
+
+	if c.LocalAddr == "" {
+		c.LocalAddr = "0.0.0.0:0"
+	}
+
+	if c.RemoteAddr == "" {
+		return nil, errors.New("remoteAddr is required")
+	}
+
+	if !isPowerOfTwo(int(c.ShardBits)) {
+		return nil, fmt.Errorf("shardBits must be power of two: %d", c.ShardBits)
+	}
+
+	laddr, err := net.ResolveUDPAddr("udp", c.LocalAddr)
 	if err != nil {
 		return nil, err
 	}
-	raddr, err := net.ResolveUDPAddr("udp", remoteAddr)
+
+	raddr, err := net.ResolveUDPAddr("udp", c.RemoteAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -56,14 +83,14 @@ func NewClientDial(localAddr, remoteAddr string, shardBits uint) (*Client, error
 		return nil, err
 	}
 
-	sz := uint32(1 << shardBits)
+	sz := uint32(1 << c.ShardBits)
+
 	client := &Client{
-		conn:        conn,
-		remoteAddr:  raddr,
-		shards:      make([]sync.Map, sz),
-		shardMask:   sz - 1,
-		MaxAttempts: 1,
-		MinRetryMs:  50,
+		conn:       conn,
+		remoteAddr: raddr,
+		shards:     make([]sync.Map, sz),
+		shardMask:  sz - 1,
+		Config:     c,
 	}
 
 	go client.readLoop()
@@ -100,7 +127,6 @@ func (c *Client) Request(ctx context.Context, data []byte) ([]byte, error) {
 		return nil, errors.New("client closed")
 	}
 
-	// 生成随机 reqID（避免用 math/rand 以免竞争）
 	reqID := c.nextReqID()
 
 	entry := &pendingEntry{ch: make(chan []byte, 1)}
@@ -222,7 +248,7 @@ func (c *Client) readLoop() {
 	}
 }
 
-// 存取 pending
+// 存取 pending 状态的channel
 func (c *Client) storePending(reqID uint32, e *pendingEntry) {
 	sh := c.shardFor(reqID)
 	sh.Store(reqID, e)
@@ -242,10 +268,10 @@ func (c *Client) deletePending(reqID uint32) {
 
 func (c *Client) shardFor(reqID uint32) *sync.Map {
 	idx := reqID & c.shardMask
+	c.Infow("shard", "reqID", reqID, "idx", idx)
 	return &c.shards[idx]
 }
 
-// randomUint32 使用 crypto/rand 生成随机数，避免竞争性 seed
 var globalReqID uint32
 
 func (c *Client) nextReqID() uint32 {
@@ -260,24 +286,4 @@ func (c *Client) nextReqID() uint32 {
 			return id
 		}
 	}
-}
-
-// 便捷错误包装
-func wrapErr(format string, a ...interface{}) error {
-	return fmt.Errorf(format, a...)
-}
-
-// 工具：把 Client 里的一些默认设置暴露给用户
-func (c *Client) SetMaxAttempts(n int) {
-	if n < 1 || n > 10 {
-		n = 10
-	}
-	c.MaxAttempts = n
-}
-func (c *Client) SetRetryBackoffMs(ms int) {
-	if ms < 50 {
-		c.MinRetryMs = 50
-	}
-
-	c.MinRetryMs = ms
 }

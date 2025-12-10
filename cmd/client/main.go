@@ -2,17 +2,33 @@ package main
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"udpclient"
+
+	"go.uber.org/zap"
 )
 
 func main() {
+
+	logger, _ := zap.NewProduction()
+	defer logger.Sync() // flushes buffer, if any
+	log := logger.Sugar()
+	// log.Infow("failed to fetch URL",
+	// 	// Structured context as loosely typed key-value pairs.
+	// 	"attempt", 3,
+	// 	"backoff", time.Second,
+	// )
+	// log.Infof("Failed to fetch URL: %s", "example.com")
+
 	// 创建客户端
-	client, err := udpclient.NewClientDial("0.0.0.0:0", "127.0.0.1:9000", 8)
+	client, err := udpclient.New(udpclient.Config{
+		RemoteAddr:    "127.0.0.1:9000",
+		SugaredLogger: log,
+	})
+
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create UDP client: %v", err)
 	}
 	defer client.Close()
 
@@ -25,8 +41,8 @@ func main() {
 
 	resp, err := client.Request(ctx, data)
 	if err != nil {
-		log.Printf("Send with context error: %v", err)
+		log.Infof("Send with context error: %v", err)
 	} else {
-		log.Printf("Received: %s", string(resp))
+		log.Infof("Received: %s", string(resp))
 	}
 }
