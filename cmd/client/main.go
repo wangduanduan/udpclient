@@ -10,7 +10,7 @@ import (
 
 func main() {
 	// 创建客户端
-	client, err := udpclient.NewClientDial("0.0.0.0:0", "127.0.0.1:8080", 8)
+	client, err := udpclient.NewClientDial("0.0.0.0:0", "127.0.0.1:9000", 8)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -27,6 +27,6 @@ func main() {
 	if err != nil {
 		log.Printf("Send with context error: %v", err)
 	} else {
-		log.Printf("Received: %s", string(resp[4:]))
+		log.Printf("Received: %s", string(resp))
 	}
 }
